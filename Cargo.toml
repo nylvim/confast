@@ -1,0 +1,15 @@
+[package]
+name = "confast"
+version = "0.1.0"
+authors = ["Vinyl <v@vinl.dev>"]
+edition = "2024"
+description = "A minimalistic dotfile manager."
+license = "GPL-3.0"
+repository = "https://github.com/nylvim/confast"
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+colored = "3.1.1"
+serde = { version = "1.0.228", features = ["derive"] }
+yaml_serde = "0.10.4"
