@@ -222,40 +222,32 @@ impl Config {
 
     fn check(&self, deploy_mode: bool) -> bool {
         let mut all_right = true;
-
-        let managed_files: HashSet<_> = self.files.keys().map(|p| p.as_path()).collect();
-
+        let managed_files: HashSet<_> = self.files.keys().collect();
         for (target, source) in &self.files {
-            if !deploy_mode {
-                if !source.is_symlink() {
+            if !target.exists() {
+                eprintln!("{} file does not exist: {}", "Error:".red().bold(), target.display());
+                all_right = false
+            }
+
+            if deploy_mode {
+                continue;
+            }
+
+            if !source.is_symlink() {
+                eprintln!("{} source is not a link: {}", "Error:".red().bold(), source.display());
+                all_right = false;
+            } else {
+                if !source.exists() {
+                    eprintln!("{} link is broken: {}", "Error:".red().bold(), source.display());
+                    all_right = false;
+                } else if !managed_files.contains(&source.read_link().unwrap()) {
                     eprintln!(
-                        "{} source is not a link: {}",
+                        "{} link does not point to a managed file: {}",
                         "Error:".red().bold(),
                         source.display()
                     );
                     all_right = false;
-                } else {
-                    if !source.exists() {
-                        eprintln!(
-                            "{} link does not point to a valid file: {}",
-                            "Error:".red().bold(),
-                            source.display()
-                        );
-                        all_right = false;
-                    } else if !managed_files.contains(source.read_link().unwrap().as_path()) {
-                        eprintln!(
-                            "{} link does not point to a managed file: {}",
-                            "Error:".red().bold(),
-                            source.display()
-                        );
-                        all_right = false;
-                    }
                 }
-            }
-
-            if !target.exists() {
-                eprintln!("{} file does not exist: {}", "Error:".red().bold(), target.display());
-                all_right = false
             }
         }
 
@@ -266,46 +258,44 @@ impl Config {
         all_right
     }
 
-    // only warns about top-level unmanaged items
+    // only warns about completely unmanaged items
     // if a directory contains any managed items, it is not warned about
     fn warn_unmanaged(&self, dir: &Path) -> (bool, bool) {
         let mut dir_contains_managed = false;
-        let mut unmanaged_dirs = Vec::new();
-        let mut unmanaged_files = Vec::new();
+        let mut dir_contains_unmanaged = false;
+        let mut unmanaged = Vec::new();
         let Ok(rd) = read_dir(dir) else { return (false, true) };
         for path in rd.flatten().map(|entry| entry.path()) {
-            if !self.files.contains_key(&path) && !self.ignored.contains(&path) {
+            let is_managed = self.files.contains_key(&path) || self.ignored.contains(&path);
+            dir_contains_managed |= is_managed;
+            if !is_managed {
                 if path.is_dir() {
-                    unmanaged_dirs.push((path, false));
+                    let (contains_managed, contains_unmanaged) = self.warn_unmanaged(&path);
+                    dir_contains_unmanaged |= contains_unmanaged;
+                    if !contains_managed {
+                        unmanaged.push(path);
+                    }
                 } else {
-                    unmanaged_files.push(path);
+                    unmanaged.push(path);
                 }
-            } else {
-                dir_contains_managed = true;
             }
         }
 
-        // only used in the root call
-        let dir_contains_unmanaged = !unmanaged_dirs.is_empty() || !unmanaged_files.is_empty();
-
-        for (path, contains_managed) in &mut unmanaged_dirs {
-            *contains_managed = self.warn_unmanaged(path).0;
-            if *contains_managed {
-                dir_contains_managed = true;
-            }
-        }
-        for (path, contains_managed) in unmanaged_dirs {
-            if dir_contains_managed && !contains_managed {
-                eprintln!(
-                    "{} directory is not managed: {}",
-                    "Warning:".yellow().bold(),
-                    path.display()
-                );
-            }
-        }
-        for path in unmanaged_files {
-            if dir_contains_managed {
-                eprintln!("{} file is not managed: {}", "Warning:".yellow().bold(), path.display());
+        if dir_contains_managed {
+            for path in &unmanaged {
+                if path.is_dir() {
+                    eprintln!(
+                        "{} directory is not managed: {}",
+                        "Warning:".yellow().bold(),
+                        path.display()
+                    );
+                } else {
+                    eprintln!(
+                        "{} file is not managed: {}",
+                        "Warning:".yellow().bold(),
+                        path.display()
+                    );
+                }
             }
         }
 
