@@ -262,21 +262,30 @@ impl Config {
     // if a directory contains any managed items, it is not warned about
     fn warn_unmanaged(&self, dir: &Path) -> (bool, bool) {
         let mut dir_contains_managed = false;
-        let mut dir_contains_unmanaged = false;
+        let mut dir_contains_unmanaged = false; // only used in root call
         let mut unmanaged = Vec::new();
         let Ok(rd) = read_dir(dir) else { return (false, true) };
         for path in rd.flatten().map(|entry| entry.path()) {
             let is_managed = self.files.contains_key(&path) || self.ignored.contains(&path);
-            dir_contains_managed |= is_managed;
+            dir_contains_managed |= is_managed; // base case
             if !is_managed {
                 if path.is_dir() {
+                    let is_empty = read_dir(&path).map_or(true, |mut rd| rd.next().is_none());
+                    if is_empty {
+                        dir_contains_unmanaged = true; // base case
+                        unmanaged.push(path);
+                        continue;
+                    }
+
                     let (contains_managed, contains_unmanaged) = self.warn_unmanaged(&path);
-                    dir_contains_unmanaged |= contains_unmanaged;
+                    dir_contains_managed |= contains_managed; // propagate up
+                    dir_contains_unmanaged |= contains_unmanaged; // propagate up
                     if !contains_managed {
                         unmanaged.push(path);
                     }
                 } else {
                     unmanaged.push(path);
+                    dir_contains_unmanaged = true; // base case
                 }
             }
         }
