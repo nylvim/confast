@@ -166,6 +166,7 @@ enum Command {
         #[arg(short, long)]
         path: Option<PathBuf>,
         /// Overwrite existing files
+        #[arg(short, long)]
         force: bool,
     },
     /// Initialize the program
