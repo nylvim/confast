@@ -85,7 +85,9 @@ fn remove(target: PathBuf) -> Result<()> {
 }
 
 fn check() -> Result<()> {
-    Config::load()?.check(false);
+    if Config::load()?.check(false) {
+        eprintln!("{} all good!", "Info:".green().bold());
+    }
     Ok(())
 }
 
