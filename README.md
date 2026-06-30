@@ -4,7 +4,9 @@ A minimalistic dotfile manager.
 
 ## Usage
 
-The term "file" can refer to a regular file or a directory.
+The term "file" below can also refer to directories.
+
+This program assumes any relevant file is under `$HOME`.
 
 ### Initialize the program
 

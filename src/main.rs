@@ -178,13 +178,15 @@ enum Command {
         path: Option<PathBuf>,
     },
 }
+
+// when actually stored:
+// `root`, `ignored` and `files.keys` are relative to dotfiles directory
+// and `files.values` are relative to home
+// this in intended to make them shorter so it'll be friendlier in case of manual editing
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
     root: PathBuf,
     ignored: Vec<PathBuf>,
-    // when actually stored:
-    // keys (also the ignored list) are relative to dotfiles directory, and values are relative to home
-    // this in intended to make them shorter so it'll be friendlier in case of manual editing
     files: BTreeMap<PathBuf, PathBuf>,
 }
 
@@ -192,9 +194,10 @@ impl Config {
     fn load_from(path: &Path) -> Result<Self> {
         let cfg: Self = yaml_serde::from_reader(File::open(path)?)?;
         let home = home_dir();
-        let ignored = cfg.ignored.into_iter().map(|p| cfg.root.join(p)).collect();
-        let files = cfg.files.into_iter().map(|(t, s)| (cfg.root.join(t), home.join(s))).collect();
-        Ok(Self { root: cfg.root, ignored, files })
+        let root = home.join(cfg.root);
+        let ignored = cfg.ignored.into_iter().map(|p| root.join(p)).collect();
+        let files = cfg.files.into_iter().map(|(t, s)| (root.join(t), home.join(s))).collect();
+        Ok(Self { root, ignored, files })
     }
 
     fn load() -> Result<Self> {
@@ -203,6 +206,7 @@ impl Config {
 
     fn save_to(&self, path: &Path) -> Result<()> {
         let home = home_dir();
+        let root = self.root.strip_prefix(&home).unwrap().to_owned();
         let ignored =
             self.ignored.iter().map(|p| p.strip_prefix(&self.root).unwrap().to_owned()).collect();
         let files = self
@@ -214,7 +218,7 @@ impl Config {
                 (target, source)
             })
             .collect();
-        let cfg = Self { root: self.root.clone(), ignored, files };
+        let cfg = Self { root, ignored, files };
         yaml_serde::to_writer(File::create(path)?, &cfg)?;
         Ok(())
     }
