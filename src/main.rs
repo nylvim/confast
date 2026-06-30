@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::env;
-use std::fs::{File, create_dir_all, read_dir, remove_dir_all, remove_file, rename};
+use std::fs::{File, create_dir_all, read_dir, remove_dir, remove_dir_all, remove_file, rename};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf, absolute};
 
@@ -79,8 +79,18 @@ fn remove(target: PathBuf) -> Result<()> {
     );
 
     remove_file(&original)?;
-    rename(target, original)?;
+    rename(&target, &original)?;
     cfg.save()?;
+
+    let parent = target.parent().unwrap();
+    if parent != cfg.root
+        && read_dir(parent).is_ok_and(|mut rd| rd.next().is_none())
+        && cfg.files.keys().find(|p| p.starts_with(parent)).is_none()
+    {
+        remove_dir(parent)?;
+        eprintln!("{} removing empty directory: {}", "Info:".green().bold(), parent.display());
+    }
+
     Ok(())
 }
 
@@ -103,7 +113,7 @@ fn deploy(root: Option<PathBuf>, force: bool) -> Result<()> {
             create_parent(target)?;
             force_symlink(target, source)?;
         } else {
-            eprintln!("Skipping existing file: {}", source.display());
+            eprintln!("{} skipping existing file: {}", "Info:".green(), source.display());
         }
     }
     Ok(())
