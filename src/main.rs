@@ -1,16 +1,16 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, create_dir_all, read_dir, remove_dir, remove_dir_all, remove_file, rename};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf, absolute};
 
-use anyhow::{Result, anyhow, ensure};
-use clap::{Parser, Subcommand};
+use anyhow::{Result, ensure};
+use clap::Parser;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    match Command::parse() {
         Command::Add { source, target } => add(source, target),
         Command::Mv { from, to } => mov(from, to),
         Command::Rm { target } => remove(target),
@@ -21,36 +21,31 @@ fn main() -> Result<()> {
 }
 
 fn add(source: PathBuf, target: Option<PathBuf>) -> Result<()> {
-    let mut cfg = Config::load()?;
+    let mut cfg = Config::load(&config_file())?;
+    let source = absolute(source)?;
+    env::set_current_dir(&cfg.root)?;
 
-    let source: PathBuf = source.components().collect();
-    let src_filename =
-        source.file_name().ok_or_else(|| anyhow!("path is invalid: {}", source.display()))?.into();
-    let target_rel = target.unwrap_or(src_filename);
-    ensure!(target_rel.is_relative(), "target must be relative: {}", target_rel.display());
-
-    let target = cfg.root.join(target_rel);
+    let source: PathBuf = source.components().collect(); // normalize path
+    let target = target.unwrap_or(source.file_name().unwrap().into());
+    ensure!(target.is_relative(), "target must be relative: {}", target.display());
     ensure!(!cfg.files.contains_key(&target), "config already contains file: {}", target.display());
-
     ensure!(source.exists(), "file does not exist: {}", source.display());
     ensure!(!target.exists(), "target already exists: {}", target.display());
 
     create_parent(&target)?;
     rename(&source, &target)?;
     force_symlink(&target, &source)?;
-
-    cfg.files.insert(target, absolute(source)?);
-    cfg.save()?;
+    cfg.files.insert(target, source);
+    cfg.save(&config_file())?;
     Ok(())
 }
 
 fn mov(from: PathBuf, to: PathBuf) -> Result<()> {
-    let mut cfg = Config::load()?;
+    let mut cfg = Config::load(&config_file())?;
+    env::set_current_dir(&cfg.root)?;
 
     ensure!(from.is_relative(), "paths must be relative: {}", from.display());
     ensure!(to.is_relative(), "paths must be relative: {}", to.display());
-    let from = cfg.root.join(&from);
-    let to = cfg.root.join(&to);
     ensure!(cfg.files.contains_key(&from), "config does not contain file: {}", from.display());
     ensure!(!cfg.files.contains_key(&to), "config already contains file: {}", to.display());
     ensure!(from.exists(), "file does not exist: {}", from.display());
@@ -60,15 +55,15 @@ fn mov(from: PathBuf, to: PathBuf) -> Result<()> {
     let source = cfg.files.remove(&from).unwrap();
     force_symlink(&to, &source)?;
     cfg.files.insert(to, source);
-    cfg.save()?;
+    cfg.save(&config_file())?;
     Ok(())
 }
 
 fn remove(target: PathBuf) -> Result<()> {
-    let mut cfg = Config::load()?;
+    let mut cfg = Config::load(&config_file())?;
+    env::set_current_dir(&cfg.root)?;
 
     ensure!(target.is_relative(), "target must be relative: {}", target.display());
-    let target = cfg.root.join(&target);
     ensure!(cfg.files.contains_key(&target), "config does not contain file: {}", target.display());
     ensure!(target.exists(), "file does not exist: {}", target.display());
     let original = cfg.files.remove(&target).unwrap();
@@ -80,32 +75,34 @@ fn remove(target: PathBuf) -> Result<()> {
 
     remove_file(&original)?;
     rename(&target, &original)?;
-    cfg.save()?;
 
     let parent = target.parent().unwrap();
     if parent != cfg.root
         && read_dir(parent).is_ok_and(|mut rd| rd.next().is_none())
-        && cfg.files.keys().find(|p| p.starts_with(parent)).is_none()
+        && !cfg.files.keys().any(|p| p.starts_with(parent))
     {
         remove_dir(parent)?;
         eprintln!("{} removing empty directory: {}", "Info:".green().bold(), parent.display());
     }
 
+    cfg.save(&config_file())?;
     Ok(())
 }
 
 fn check() -> Result<()> {
-    if Config::load()?.check(false) {
+    if Config::load(&config_file())?.check(false) {
         eprintln!("{} all good!", "Info:".green().bold());
+        Ok(())
+    } else {
+        std::process::exit(1);
     }
-    Ok(())
 }
 
 fn deploy(root: Option<PathBuf>, force: bool) -> Result<()> {
-    let root = root.unwrap_or(dotfile_path());
+    let root = root.unwrap_or(dotfiles_dir());
     ensure!(root.is_dir(), "path is not a directory");
 
-    let cfg = Config::load_from(&root.join("confast/config.yaml"))?;
+    let cfg = Config::load(&root.join("confast/config.yaml"))?;
     ensure!(cfg.check(true), "please resolve these issues before continuing");
 
     for (target, source) in &cfg.files {
@@ -120,7 +117,7 @@ fn deploy(root: Option<PathBuf>, force: bool) -> Result<()> {
 }
 
 fn init(root: Option<PathBuf>) -> Result<()> {
-    let root = root.and_then(|p| absolute(p).ok()).unwrap_or(dotfile_path());
+    let root = root.and_then(|p| absolute(p).ok()).unwrap_or(dotfiles_dir());
     let managed_cfg_dir = root.join("confast");
     let managed_cfg_file = managed_cfg_dir.join("config.yaml");
     ensure!(
@@ -130,26 +127,20 @@ fn init(root: Option<PathBuf>) -> Result<()> {
     );
 
     let cfg_dir = config_dir().join("confast");
-    let cfg = Config {
-        root,
-        ignored: vec![".git".into(), ".gitignore".into()],
-        files: [(managed_cfg_dir.clone(), cfg_dir.clone())].into(),
-    };
-
     create_parent(&cfg_dir)?;
     create_parent(&managed_cfg_file)?;
     force_symlink(&managed_cfg_dir, &cfg_dir)?;
-    cfg.save_to(&managed_cfg_file)?;
+
+    Config {
+        root,
+        ignored: vec![".git".into(), ".gitignore".into()],
+        files: [(managed_cfg_dir, cfg_dir)].into(),
+    }
+    .save(&managed_cfg_file)?;
     Ok(())
 }
 
 #[derive(Parser)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
 enum Command {
     /// Add a new managed file
     Add {
@@ -174,7 +165,7 @@ enum Command {
     Check,
     /// Deploy dotfiles
     Deploy {
-        /// Path to dotfiles directory, default is $HOME/.confast
+        /// Path to dotfiles directory, default is ~/.confast
         #[arg(short, long)]
         path: Option<PathBuf>,
         /// Overwrite existing files
@@ -183,16 +174,14 @@ enum Command {
     },
     /// Initialize the program
     Init {
-        /// Path to dotfiles directory, default is $HOME/.confast
+        /// Path to dotfiles directory, default is ~/.confast
         #[arg(short, long)]
         path: Option<PathBuf>,
     },
 }
 
-// when actually stored:
-// `root`, `ignored` and `files.keys` are relative to dotfiles directory
-// and `files.values` are relative to home
-// this in intended to make them shorter so it'll be friendlier in case of manual editing
+// when loaded in program:
+// `root` and `files.values` are made absolute
 #[derive(Clone, Serialize, Deserialize)]
 struct Config {
     root: PathBuf,
@@ -201,45 +190,28 @@ struct Config {
 }
 
 impl Config {
-    fn load_from(path: &Path) -> Result<Self> {
-        let cfg: Self = yaml_serde::from_reader(File::open(path)?)?;
+    fn load(path: &Path) -> Result<Self> {
+        let mut cfg: Self = yaml_serde::from_reader(File::open(path)?)?;
         let home = home_dir();
-        let root = home.join(cfg.root);
-        let ignored = cfg.ignored.into_iter().map(|p| root.join(p)).collect();
-        let files = cfg.files.into_iter().map(|(t, s)| (root.join(t), home.join(s))).collect();
-        Ok(Self { root, ignored, files })
+        cfg.root = home.join(cfg.root);
+        cfg.files.values_mut().for_each(|p| *p = home.join(&p));
+        Ok(cfg)
     }
 
-    fn load() -> Result<Self> {
-        Self::load_from(&config_path())
-    }
-
-    fn save_to(&self, path: &Path) -> Result<()> {
+    fn save(mut self, path: &Path) -> Result<()> {
         let home = home_dir();
-        let root = self.root.strip_prefix(&home).unwrap().to_owned();
-        let ignored =
-            self.ignored.iter().map(|p| p.strip_prefix(&self.root).unwrap().to_owned()).collect();
-        let files = self
-            .files
-            .iter()
-            .map(|(target, source)| {
-                let target = target.strip_prefix(&self.root).unwrap().to_owned();
-                let source = source.strip_prefix(&home).unwrap().to_owned();
-                (target, source)
-            })
-            .collect();
-        let cfg = Self { root, ignored, files };
-        yaml_serde::to_writer(File::create(path)?, &cfg)?;
+        self.root = self.root.strip_prefix(&home).unwrap().to_owned();
+        self.files.values_mut().for_each(|p| *p = p.strip_prefix(&home).unwrap().to_owned());
+        yaml_serde::to_writer(File::create(path)?, &self)?;
         Ok(())
     }
 
-    fn save(&self) -> Result<()> {
-        self.save_to(&config_path())
-    }
-
     fn check(&self, deploy_mode: bool) -> bool {
+        if env::set_current_dir(&self.root).is_err() {
+            return false;
+        }
+
         let mut all_right = true;
-        let managed_files: HashSet<_> = self.files.keys().collect();
         for (target, source) in &self.files {
             if !target.exists() {
                 eprintln!("{} file does not exist: {}", "Error:".red().bold(), target.display());
@@ -257,7 +229,12 @@ impl Config {
                 if !source.exists() {
                     eprintln!("{} link is broken: {}", "Error:".red().bold(), source.display());
                     all_right = false;
-                } else if !managed_files.contains(&source.read_link().unwrap()) {
+                } else if source
+                    .canonicalize()
+                    .unwrap()
+                    .strip_prefix(&self.root)
+                    .map_or(true, |p| !self.files.contains_key(p))
+                {
                     eprintln!(
                         "{} link does not point to a managed file: {}",
                         "Error:".red().bold(),
@@ -268,7 +245,7 @@ impl Config {
             }
         }
 
-        if !deploy_mode && self.warn_unmanaged(&self.root).1 {
+        if !deploy_mode && self.warn_unmanaged(Path::new(".")).1 {
             all_right = false;
         }
 
@@ -278,54 +255,46 @@ impl Config {
     // only warns about completely unmanaged items
     // if a directory contains any managed items, it is not warned about
     fn warn_unmanaged(&self, dir: &Path) -> (bool, bool) {
-        let mut dir_contains_managed = false;
-        let mut dir_contains_unmanaged = false; // only used in root call
+        let mut contains_managed = false;
+        let mut contains_unmanaged = false; // only used in root call
         let mut unmanaged = Vec::new();
         let Ok(rd) = read_dir(dir) else { return (false, true) };
         for path in rd.flatten().map(|entry| entry.path()) {
+            let path = path.strip_prefix(".").map(PathBuf::from).unwrap_or(path);
             let is_managed = self.files.contains_key(&path) || self.ignored.contains(&path);
-            dir_contains_managed |= is_managed; // base case
-            if !is_managed {
-                if path.is_dir() {
-                    let is_empty = read_dir(&path).map_or(true, |mut rd| rd.next().is_none());
-                    if is_empty {
-                        dir_contains_unmanaged = true; // base case
-                        unmanaged.push(path);
-                        continue;
-                    }
+            contains_managed |= is_managed; // base case
+            if is_managed {
+                continue;
+            }
 
-                    let (contains_managed, contains_unmanaged) = self.warn_unmanaged(&path);
-                    dir_contains_managed |= contains_managed; // propagate up
-                    dir_contains_unmanaged |= contains_unmanaged; // propagate up
-                    if !contains_managed {
-                        unmanaged.push(path);
-                    }
-                } else {
+            if path.is_dir() {
+                let is_empty = read_dir(&path).map_or(true, |mut rd| rd.next().is_none());
+                if is_empty {
+                    contains_unmanaged = true; // base case
                     unmanaged.push(path);
-                    dir_contains_unmanaged = true; // base case
+                    continue;
                 }
+
+                let (sub_contains_managed, sub_contains_unmanaged) = self.warn_unmanaged(&path);
+                contains_managed |= sub_contains_managed; // propagate up
+                contains_unmanaged |= sub_contains_unmanaged; // propagate up
+                if !contains_managed {
+                    unmanaged.push(path);
+                }
+            } else {
+                contains_unmanaged = true; // base case
+                unmanaged.push(path);
             }
         }
 
-        if dir_contains_managed {
+        if !contains_managed {
             for path in &unmanaged {
-                if path.is_dir() {
-                    eprintln!(
-                        "{} directory is not managed: {}",
-                        "Warning:".yellow().bold(),
-                        path.display()
-                    );
-                } else {
-                    eprintln!(
-                        "{} file is not managed: {}",
-                        "Warning:".yellow().bold(),
-                        path.display()
-                    );
-                }
+                let ty = if path.is_dir() { "directory" } else { "file" };
+                eprintln!("{} {ty} is not managed: {}", "Warning:".yellow().bold(), path.display());
             }
         }
 
-        (dir_contains_managed, dir_contains_unmanaged)
+        (contains_managed, contains_unmanaged)
     }
 }
 
@@ -351,17 +320,17 @@ fn force_symlink(from: &Path, to: &Path) -> Result<()> {
 }
 
 fn home_dir() -> PathBuf {
-    env::var_os("HOME").unwrap().into()
+    env::home_dir().unwrap()
+}
+
+fn dotfiles_dir() -> PathBuf {
+    home_dir().join(".confast")
 }
 
 fn config_dir() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".config"))
 }
 
-fn dotfile_path() -> PathBuf {
-    home_dir().join(".confast")
-}
-
-fn config_path() -> PathBuf {
+fn config_file() -> PathBuf {
     config_dir().join("confast/config.yaml")
 }
