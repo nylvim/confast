@@ -68,7 +68,7 @@ fn remove(target: PathBuf) -> Result<()> {
     ensure!(target.exists(), "file does not exist: {}", target.display());
     let original = cfg.files.remove(&target).unwrap();
     ensure!(
-        original.read_link().is_ok_and(|p| p == target),
+        original.read_link().is_ok_and(|p| p.strip_prefix(&cfg.root).is_ok_and(|p| p == target)),
         "original location is not a link pointing to target: {}",
         original.display()
     );
@@ -308,6 +308,7 @@ fn create_parent(path: &Path) -> Result<()> {
 }
 
 fn force_symlink(from: &Path, to: &Path) -> Result<()> {
+    let from = if from.is_absolute() { from } else { &absolute(from)? };
     if to.is_symlink() || to.exists() {
         if to.is_dir() {
             remove_dir_all(to)?;
