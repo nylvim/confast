@@ -20,6 +20,8 @@ confast init [PATH]
 
 Link dotfiles to recorded locations.
 
+You need to manually link the config to `.config/confast/config.yaml` first.
+
 Use `-f`/`--force` to overwrite existing files.
 
 ```

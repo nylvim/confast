@@ -21,7 +21,7 @@ fn main() -> Result<()> {
 }
 
 fn add(source: PathBuf, target: Option<PathBuf>) -> Result<()> {
-    let mut cfg = Config::load(&config_file())?;
+    let mut cfg = Config::load()?;
     let source = absolute(source)?;
     env::set_current_dir(&cfg.root)?;
 
@@ -36,12 +36,12 @@ fn add(source: PathBuf, target: Option<PathBuf>) -> Result<()> {
     rename(&source, &target)?;
     force_symlink(&target, &source)?;
     cfg.files.insert(target, source);
-    cfg.save(&config_file())?;
+    cfg.save()?;
     Ok(())
 }
 
 fn mov(from: PathBuf, to: PathBuf) -> Result<()> {
-    let mut cfg = Config::load(&config_file())?;
+    let mut cfg = Config::load()?;
     env::set_current_dir(&cfg.root)?;
 
     ensure!(from.is_relative(), "paths must be relative: {}", from.display());
@@ -55,12 +55,12 @@ fn mov(from: PathBuf, to: PathBuf) -> Result<()> {
     let source = cfg.files.remove(&from).unwrap();
     force_symlink(&to, &source)?;
     cfg.files.insert(to, source);
-    cfg.save(&config_file())?;
+    cfg.save()?;
     Ok(())
 }
 
 fn remove(target: PathBuf) -> Result<()> {
-    let mut cfg = Config::load(&config_file())?;
+    let mut cfg = Config::load()?;
     env::set_current_dir(&cfg.root)?;
 
     ensure!(target.is_relative(), "target must be relative: {}", target.display());
@@ -85,12 +85,12 @@ fn remove(target: PathBuf) -> Result<()> {
         eprintln!("{} removing empty directory: {}", "Info:".green().bold(), parent.display());
     }
 
-    cfg.save(&config_file())?;
+    cfg.save()?;
     Ok(())
 }
 
 fn check() -> Result<()> {
-    if Config::load(&config_file())?.check(false) {
+    if Config::load()?.check(false) {
         eprintln!("{} all good!", "Info:".green().bold());
         Ok(())
     } else {
@@ -102,12 +102,16 @@ fn deploy(root: Option<PathBuf>, force: bool) -> Result<()> {
     let root = root.unwrap_or(dotfiles_dir());
     ensure!(root.is_dir(), "path is not a directory");
 
-    let cfg = Config::load(&root.join("confast/config.yaml"))?;
+    ensure!(
+        config_file().exists(),
+        "please manually copy the config to .config/confast/config.yaml first"
+    );
+    let cfg = Config::load()?;
     ensure!(cfg.check(true), "please resolve these issues before continuing");
 
     for (target, source) in &cfg.files {
         if !source.exists() || force {
-            create_parent(target)?;
+            create_parent(source)?;
             force_symlink(target, source)?;
         } else {
             eprintln!("{} skipping existing file: {}", "Info:".green(), source.display());
@@ -136,7 +140,7 @@ fn init(root: Option<PathBuf>) -> Result<()> {
         ignored: vec![".git".into(), ".gitignore".into()],
         files: [(managed_cfg_dir, cfg_dir)].into(),
     }
-    .save(&managed_cfg_file)?;
+    .save()?;
     Ok(())
 }
 
@@ -190,19 +194,19 @@ struct Config {
 }
 
 impl Config {
-    fn load(path: &Path) -> Result<Self> {
-        let mut cfg: Self = yaml_serde::from_reader(File::open(path)?)?;
+    fn load() -> Result<Self> {
+        let mut cfg: Self = yaml_serde::from_reader(File::open(config_file())?)?;
         let home = home_dir();
         cfg.root = home.join(cfg.root);
         cfg.files.values_mut().for_each(|p| *p = home.join(&p));
         Ok(cfg)
     }
 
-    fn save(mut self, path: &Path) -> Result<()> {
+    fn save(mut self) -> Result<()> {
         let home = home_dir();
         self.root = self.root.strip_prefix(&home).unwrap().to_owned();
         self.files.values_mut().for_each(|p| *p = p.strip_prefix(&home).unwrap().to_owned());
-        yaml_serde::to_writer(File::create(path)?, &self)?;
+        yaml_serde::to_writer(File::create(config_file())?, &self)?;
         Ok(())
     }
 
